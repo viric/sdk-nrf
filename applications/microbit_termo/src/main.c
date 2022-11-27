@@ -25,6 +25,14 @@
 #include <zephyr/bluetooth/gatt.h>
 
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/counter.h>
+
+#include <zephyr/logging/log.h>
+LOG_MODULE_REGISTER(main);
+
+#include <nrfx_gpiote.h>
+#include <nrfx_ppi.h>
+#include <nrfx_timer.h>
 
 #include "main.h"
 
@@ -206,11 +214,122 @@ static void configure_buttons(void)
     gpio_pin_configure(gpio_dev, SWITCH_PIN, GPIO_OUTPUT_LOW | GPIO_ACTIVE_HIGH);
 }
 
+/* COUNT PULSES */
+
+static nrfx_timer_t flowtimer_instance = NRFX_TIMER_INSTANCE(1);
+
+static void timer_handler(nrf_timer_event_t event_type, void *p_context)
+{
+}
+
+static void init_waterflow()
+{
+    nrfx_err_t err;
+
+    uint8_t ppi_channel;
+    uint8_t in_channel;
+
+    /* Start the timer */
+    static const nrfx_timer_config_t timer_config = {
+        .frequency = NRF_TIMER_FREQ_31250Hz,
+        .mode = NRF_TIMER_MODE_COUNTER,
+        .bit_width = NRF_TIMER_BIT_WIDTH_32,
+        .interrupt_priority = 0
+    };
+
+    err = nrfx_timer_init(&flowtimer_instance, &timer_config, timer_handler);
+    if (err != NRFX_SUCCESS) {
+        LOG_ERR("nrfx_timer_init error: 0x%08X", err);
+        return;
+    }
+
+    nrfx_timer_enable(&flowtimer_instance);
+
+    LOG_INF("timer initialized");
+
+    /* GPIOTE */
+    gpio_dev = DEVICE_DT_GET(DT_NODELABEL(gpio0));
+
+    /* Initialize GPIOTE (the interrupt priority passed as the parameter
+     * here is ignored, see nrfx_glue.h).
+     */
+    if (!nrfx_gpiote_is_init())
+    {
+        err = nrfx_gpiote_init(0);
+        if (err != NRFX_SUCCESS) {
+            LOG_ERR("nrfx_gpiote_init error: 0x%08X", err);
+            return;
+        }
+    }
+
+    err = nrfx_gpiote_channel_alloc(&in_channel);
+    if (err != NRFX_SUCCESS) {
+        LOG_ERR("Failed to allocate in_channel, error: 0x%08X", err);
+        return;
+    }
+
+    /* Initialize input pin to generate event on high to low transition
+     * (falling edge) and call button_handler()
+     */
+    static const nrfx_gpiote_input_config_t input_config = {
+        .pull = NRF_GPIO_PIN_PULLUP,
+    };
+    const nrfx_gpiote_trigger_config_t trigger_config = {
+        .trigger = NRFX_GPIOTE_TRIGGER_LOTOHI,
+        .p_in_channel = &in_channel,
+    };
+
+#define INPUT_PIN 10 /* Edge connector pin 8, digital IO */
+//#define INPUT_PIN 3 /* Edge connector pin 1, analog/digital IO */
+
+    err = nrfx_gpiote_input_configure(INPUT_PIN,
+                      &input_config,
+                      &trigger_config,
+                      NULL);
+
+    if (err != NRFX_SUCCESS) {
+        LOG_ERR("nrfx_gpiote_input_configure error: 0x%08X", err);
+        return;
+    }
+
+    nrfx_gpiote_trigger_enable(INPUT_PIN, true);
+
+    LOG_INF("nrfx_gpiote initialized");
+
+    /* Allocate a PPI channel. */
+    err = nrfx_ppi_channel_alloc(&ppi_channel);
+    if (err != NRFX_SUCCESS) {
+        LOG_ERR("nrfx_ppi_channel_alloc error: 0x%08X", err);
+        return;
+    }
+
+    /* Configure endpoints of the channel so that the input pin event is
+     * connected with the output pin OUT task. This means that each time
+     * the button is pressed, the LED pin will be toggled.
+     */
+    err = nrfx_ppi_channel_assign(ppi_channel,
+        nrfx_gpiote_in_event_addr_get(INPUT_PIN),
+        nrfx_timer_task_address_get(&flowtimer_instance, NRF_TIMER_TASK_COUNT));
+
+    if (err != NRFX_SUCCESS) {
+        LOG_ERR("nrfx_ppi_channel_endpoints_setup error: 0x%08X", err);
+        return;
+    }
+
+    /* Enable the channel. */
+    nrfx_ppi_channel_enable(ppi_channel);
+
+
+    LOG_INF("ppi initialized");
+}
+
 void main(void)
 {
 	int err;
 
     configure_buttons();
+
+    init_waterflow();
 
     menu_boot();
 
@@ -229,5 +348,8 @@ void main(void)
 	 */
 	while (1) {
 		k_sleep(K_SECONDS(1));
+        printk("Counter: %d\n", nrfx_timer_capture(&flowtimer_instance, NRF_TIMER_CC_CHANNEL0));
+        printk("Pint set: %d, raw: %d\n", (int) nrfx_gpiote_in_is_set(INPUT_PIN),
+            gpio_pin_get(gpio_dev, INPUT_PIN));
 	}
 }
