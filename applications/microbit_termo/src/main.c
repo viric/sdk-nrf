@@ -26,6 +26,7 @@
 
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/counter.h>
+#include <zephyr/drivers/sensor.h>
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(main);
@@ -323,6 +324,32 @@ static void init_waterflow()
     LOG_INF("ppi initialized");
 }
 
+/*
+ * Get a device structure from a devicetree node with compatible
+ * "maxim,ds18b20". (If there are multiple, just pick one.)
+ */
+static const struct device *get_ds18b20_device(void)
+{
+    const struct device *dev = DEVICE_DT_GET_ANY(maxim_ds18b20);
+
+    if (dev == NULL) {
+        /* No such node, or the node does not have status "okay". */
+        printk("\nError: no device found.\n");
+        return NULL;
+    }
+
+    if (!device_is_ready(dev)) {
+        printk("\nError: Device \"%s\" is not ready; "
+               "check the driver initialization logs for errors.\n",
+               dev->name);
+        return NULL;
+    }
+
+    printk("Found device \"%s\", getting sensor data\n", dev->name);
+    return dev;
+}
+
+
 void main(void)
 {
 	int err;
@@ -343,13 +370,24 @@ void main(void)
 
 	bt_conn_auth_cb_register(&auth_cb_display);
 
+    const struct device *dev = get_ds18b20_device();
+    if (dev == NULL) {
+        return;
+    }
+
+
 	/* Implement notification. At the moment there is no suitable way
 	 * of starting delayed work so we do it here
 	 */
 	while (1) {
 		k_sleep(K_SECONDS(1));
         printk("Counter: %d\n", nrfx_timer_capture(&flowtimer_instance, NRF_TIMER_CC_CHANNEL0));
-        printk("Pint set: %d, raw: %d\n", (int) nrfx_gpiote_in_is_set(INPUT_PIN),
-            gpio_pin_get(gpio_dev, INPUT_PIN));
+
+        struct sensor_value temp;
+
+        sensor_sample_fetch(dev);
+        sensor_channel_get(dev, SENSOR_CHAN_AMBIENT_TEMP, &temp);
+
+        printk("Temp: %d.%06d\n", temp.val1, temp.val2);
 	}
 }
